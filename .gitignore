@@ -1,0 +1,11 @@
+.DS_Store
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+AWDLDisabler.app/Contents/_CodeSignature/
+AWDLDisabler.app/Contents/Library/LaunchDaemons/AWDLDisablerDaemon
+AWDLDisabler.app/Contents/MacOS/AWDLDisablerApp

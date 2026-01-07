@@ -1,0 +1,13 @@
+[package]
+name = "awdl-disabler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2.179"
+
+[build-dependencies]
+cc = "1.2.51"
+
+[profile.release]
+lto = true
