@@ -8,4 +8,4 @@ cp ./rust/target/release/awdl-disabler ./AWDLDisabler.app/Contents/Library/Launc
 chmod +x ./AWDLDisabler.app/Contents/MacOS/AWDLDisablerApp
 chmod +x ./AWDLDisabler.app/Contents/Library/LaunchDaemons/AWDLDisablerDaemon
 
-# codesign --force --deep --sign - AWDLDisabler.app
+codesign --force --deep --sign - AWDLDisabler.app
