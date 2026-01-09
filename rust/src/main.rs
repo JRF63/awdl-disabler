@@ -26,6 +26,9 @@ fn disable_awdl() -> Result<()> {
     // Must be AF_ROUTE + SOCK_RAW and non-blocking
     let read_fd = {
         let raw_fd = unsafe { libc::socket(libc::AF_ROUTE, libc::SOCK_RAW, 0) };
+        if raw_fd == -1 {
+            return Err(Error::last());
+        }
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
         unsafe {
             if libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) == -1 {
