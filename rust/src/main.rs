@@ -11,14 +11,18 @@ use std::{
 use awdl_controller::AWDLController;
 use error::{Error, Result};
 use event::{EventQueue, PollAction};
+use os_log::Logger;
 
-fn disable_awdl() -> Result<()> {
+fn disable_awdl(logger: &mut Logger) -> Result<()> {
     let mut awdl_controller = AWDLController::new()?;
 
     // Disable awdl0 at program start
     awdl_controller.handle_if_up(|is_up, tmp, current_flags| {
         if is_up {
             tmp.disable(current_flags)?;
+            logger.log(c"Disabling awdl0");
+        } else {
+            logger.log(c"awdl0 already disabled");
         }
         Ok(())
     })?;
@@ -41,6 +45,8 @@ fn disable_awdl() -> Result<()> {
     let mut event_queue = EventQueue::new_with_read_fd(&read_fd)?;
     event_queue.add_signal(libc::SIGINT)?;
     event_queue.add_signal(libc::SIGTERM)?;
+
+    logger.log(c"Watching for awdl0 interface changes");
 
     let mut stop_loop = false;
     while !stop_loop {
@@ -109,6 +115,9 @@ fn disable_awdl() -> Result<()> {
     awdl_controller.handle_if_up(|is_up, tmp, current_flags| {
         if !is_up {
             tmp.enable(current_flags)?;
+            logger.log(c"Re-enabling awdl0");
+        } else {
+            logger.log(c"awdl0 already re-enabled");
         }
         Ok(())
     })?;
@@ -116,40 +125,24 @@ fn disable_awdl() -> Result<()> {
     Ok(())
 }
 
-#[repr(transparent)]
-struct DaemonLogger {
-    inner: os_log::Logger,
-}
-
-impl Drop for DaemonLogger {
-    fn drop(&mut self) {
-        self.inner.log(c"AWDLDaemon exiting");
-    }
-}
-
-impl DaemonLogger {
-    fn new() -> Self {
-        let mut inner = os_log::Logger::new(c"awdldisabler.app", c"daemon");
-        inner.log(c"AWDLDaemon started");
-        DaemonLogger { inner }
-    }
-
-    fn error(&mut self, message: &CStr) {
-        self.inner.error(message)
-    }
-}
-
 fn main() {
-    let mut logger = DaemonLogger::new();
-    if unsafe { libc::getuid() } != 0 {
-        logger.error(c"AWDLDaemon requires root");
-        std::process::exit(1);
-    }
+    let mut logger = Logger::new(c"awdldisabler.app", c"daemon");
 
-    if let Err(e) = disable_awdl() {
-        let ptr = unsafe { libc::strerror(e.raw_error()) };
-        let cstr = unsafe { CStr::from_ptr(ptr) };
-        logger.error(cstr);
-        std::process::exit(e.raw_error());
-    }
+    let exit_code = 'main: {
+        if unsafe { libc::getuid() } != 0 {
+            logger.error(c"AWDLDaemon requires root");
+            break 'main 1;
+        }
+
+        if let Err(e) = disable_awdl(&mut logger) {
+            let ptr = unsafe { libc::strerror(e.raw_error()) };
+            let cstr = unsafe { CStr::from_ptr(ptr) };
+            logger.error(cstr);
+            break 'main e.raw_error();
+        }
+
+        0 // No error
+    };
+    logger.log(c"AWDLDaemon exiting");
+    std::process::exit(exit_code);
 }

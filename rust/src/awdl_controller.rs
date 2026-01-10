@@ -63,9 +63,9 @@ impl AWDLController {
         Ok(())
     }
 
-    pub fn handle_if_up<F>(&mut self, action: F) -> Result<()>
+    pub fn handle_if_up<F>(&mut self, mut action: F) -> Result<()>
     where
-        F: Fn(bool, &mut AWDLController, libc::c_int) -> Result<()>,
+        F: FnMut(bool, &mut AWDLController, libc::c_int) -> Result<()>,
     {
         self.ioctl(SIOCGIFFLAGS)?;
         let current_flags = self.get_flags() as libc::c_int;
