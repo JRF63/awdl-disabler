@@ -3,48 +3,57 @@ mod error;
 mod event;
 mod os_log;
 
-use std::{
-    ffi::CStr,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
-};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use awdl_controller::AWDLController;
-use error::{Error, Result};
+use error::{DaemonError, Error, PosixError};
 use event::{EventQueue, PollAction};
 use os_log::Logger;
 
-fn disable_awdl(logger: &mut Logger) -> Result<()> {
+fn err_mapper(daemon_error: DaemonError) -> impl Fn(PosixError) -> Error {
+    move |posix_error| Error::new(posix_error, daemon_error)
+}
+
+fn disable_awdl(logger: &mut Logger) -> Result<(), Error> {
     let mut awdl_controller = AWDLController::new()?;
 
     // Disable awdl0 at program start
-    awdl_controller.handle_if_up(|is_up, tmp, current_flags| {
+    {
+        let (is_up, current_flags) = awdl_controller
+            .current_status()
+            .map_err(err_mapper(DaemonError::ControllerStatusStart))?;
         if is_up {
-            tmp.disable(current_flags)?;
+            awdl_controller
+                .disable(current_flags)
+                .map_err(err_mapper(DaemonError::InitialDisable))?;
             logger.log(c"Disabling awdl0");
         } else {
             logger.log(c"awdl0 already disabled");
         }
-        Ok(())
-    })?;
+    }
 
     // Must be AF_ROUTE + SOCK_RAW and non-blocking
     let read_fd = {
         let raw_fd = unsafe { libc::socket(libc::AF_ROUTE, libc::SOCK_RAW, 0) };
         if raw_fd == -1 {
-            return Err(Error::last());
+            return Err(Error::last(DaemonError::ReadFDCreation));
         }
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
         unsafe {
             if libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) == -1 {
-                return Err(Error::last());
+                return Err(Error::last(DaemonError::ReadFDNonBlocking));
             }
         }
         fd
     };
 
     let mut event_queue = EventQueue::new_with_read_fd(&read_fd)?;
-    event_queue.add_signal(libc::SIGINT)?;
-    event_queue.add_signal(libc::SIGTERM)?;
+    event_queue
+        .add_signal(libc::SIGINT)
+        .map_err(err_mapper(DaemonError::AddSigint))?;
+    event_queue
+        .add_signal(libc::SIGTERM)
+        .map_err(err_mapper(DaemonError::AddSigterm))?;
 
     logger.log(c"Watching for awdl0 interface changes");
 
@@ -58,7 +67,10 @@ fn disable_awdl(logger: &mut Logger) -> Result<()> {
                         Ok(PollAction::Stop)
                     } else {
                         // Unknown signal we didn't register for
-                        Err(Error::last())
+                        Err(Error::new(
+                            PosixError::from_raw(0),
+                            DaemonError::UnknownSignal,
+                        ))
                     }
                 }
                 libc::EVFILT_READ => {
@@ -78,11 +90,14 @@ fn disable_awdl(logger: &mut Logger) -> Result<()> {
                             )
                         };
                         if len == -1 {
-                            let errno = Error::last().raw_error();
-                            match errno {
+                            let posix_error = PosixError::last();
+                            match posix_error.code() {
                                 libc::EINTR => continue, // Try again
-                                libc::EAGAIN => break,   // Back to polling
-                                e => return Err(Error::from_raw(e)),
+                                libc::EAGAIN => break, // Back to polling (note: EAGAIN == EWOULDBLOCK)
+                                _ => {
+                                    // Actual read error
+                                    return Err(Error::new(posix_error, DaemonError::Read));
+                                }
                             }
                         }
 
@@ -101,32 +116,42 @@ fn disable_awdl(logger: &mut Logger) -> Result<()> {
                     }
 
                     if (latest_flags & libc::IFF_UP) != 0 {
-                        awdl_controller.disable(latest_flags)?;
+                        awdl_controller
+                            .disable(latest_flags as libc::c_short)
+                            .map_err(err_mapper(DaemonError::Disable))?;
                     }
 
                     Ok(PollAction::Continue)
                 }
-                _ => Ok(PollAction::Continue), // Ignore unknown event
+                _ => Err(Error::new(
+                    PosixError::from_raw(0),
+                    DaemonError::UnknownEvent,
+                )),
             }
         })?;
     }
 
     // Re-enable awdl0 on exit
-    awdl_controller.handle_if_up(|is_up, tmp, current_flags| {
+    {
+        let (is_up, current_flags) = awdl_controller
+            .current_status()
+            .map_err(err_mapper(DaemonError::ControllerStatusEnd))?;
         if !is_up {
-            tmp.enable(current_flags)?;
+            awdl_controller
+                .enable(current_flags)
+                .map_err(err_mapper(DaemonError::ReenableOnExit))?;
             logger.log(c"Re-enabling awdl0");
         } else {
             logger.log(c"awdl0 already re-enabled");
         }
-        Ok(())
-    })?;
+    }
 
     Ok(())
 }
 
 fn main() {
     let mut logger = Logger::new(c"awdldisabler.app", c"daemon");
+    logger.log(c"AWDLDaemon started");
 
     let exit_code = 'main: {
         if unsafe { libc::getuid() } != 0 {
@@ -134,11 +159,9 @@ fn main() {
             break 'main 1;
         }
 
-        if let Err(e) = disable_awdl(&mut logger) {
-            let ptr = unsafe { libc::strerror(e.raw_error()) };
-            let cstr = unsafe { CStr::from_ptr(ptr) };
-            logger.error(cstr);
-            break 'main e.raw_error();
+        if let Err(error) = disable_awdl(&mut logger) {
+            error::log_error(&mut logger, &error);
+            break 'main error.posix_error().code();
         }
 
         0 // No error

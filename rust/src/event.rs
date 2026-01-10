@@ -1,6 +1,6 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use crate::error::{Error, Result};
+use crate::error::{DaemonError, Error, PosixError};
 
 pub struct EventQueue<'a> {
     kq_fd: OwnedFd,
@@ -9,10 +9,12 @@ pub struct EventQueue<'a> {
 }
 
 impl<'a> EventQueue<'a> {
-    pub fn new_with_read_fd(read_fd: &'a OwnedFd) -> Result<Self> {
+    /// Create a new `EventQueue` tied to the lifetime of `read_fd`. This ensures that the polled
+    /// file descriptor isn't closed yet during polling.
+    pub fn new_with_read_fd(read_fd: &'a OwnedFd) -> Result<Self, Error> {
         let fd = unsafe { libc::kqueue() };
         if fd < 0 {
-            Err(Error::last())
+            Err(Error::last(DaemonError::KqueueFileDescriptor))
         } else {
             let kq_fd = unsafe { OwnedFd::from_raw_fd(fd) };
             let mut event_queue = EventQueue {
@@ -29,13 +31,15 @@ impl<'a> EventQueue<'a> {
                 data: 0,
                 udata: std::ptr::null_mut(),
             };
-            event_queue.add_event(&event)?;
+            event_queue
+                .add_event(&event)
+                .map_err(crate::err_mapper(DaemonError::AddReadFD))?;
 
             Ok(event_queue)
         }
     }
 
-    fn add_event(&mut self, event: &libc::kevent) -> Result<()> {
+    fn add_event(&mut self, event: &libc::kevent) -> Result<(), PosixError> {
         let changes = std::slice::from_ref(event);
         let result = unsafe {
             libc::kevent(
@@ -49,18 +53,18 @@ impl<'a> EventQueue<'a> {
         };
         if result == -1 {
             // Failed to register
-            Err(Error::last())
+            Err(PosixError::last())
         } else {
             self.events.push(unsafe { std::mem::zeroed() });
             Ok(())
         }
     }
 
-    pub fn add_signal(&mut self, signal: libc::c_int) -> Result<()> {
+    pub fn add_signal(&mut self, signal: libc::c_int) -> Result<(), PosixError> {
         // Need to disable default action for monitored signals
         unsafe {
             if libc::signal(signal, libc::SIG_IGN) == libc::SIG_ERR {
-                return Err(Error::last());
+                return Err(PosixError::last());
             }
         }
         let event = libc::kevent {
@@ -94,9 +98,9 @@ impl<'a> EventQueue<'a> {
     /// Returns an error if:
     /// * the underlying `kevent(2)` system call fails
     /// * `action` returns an error
-    pub fn poll<F>(&mut self, mut action: F) -> Result<()>
+    pub fn poll<F>(&mut self, mut action: F) -> Result<(), Error>
     where
-        F: FnMut(&libc::kevent) -> Result<PollAction>,
+        F: FnMut(&libc::kevent) -> Result<PollAction, Error>,
     {
         let num_events = unsafe {
             libc::kevent(
@@ -109,7 +113,7 @@ impl<'a> EventQueue<'a> {
             )
         };
         if num_events == -1 {
-            return Err(Error::last());
+            return Err(Error::new(PosixError::last(), DaemonError::Poll));
         }
 
         for event in &self.events[..(num_events as usize)] {
