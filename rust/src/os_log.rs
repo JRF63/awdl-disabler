@@ -1,5 +1,5 @@
 #![allow(non_camel_case_types)]
-use std::ffi::{c_char, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 
 const OS_LOG_TYPE_DEFAULT: u8 = 0x00;
 // const OS_LOG_TYPE_INFO: u8 = 0x01;
@@ -45,27 +45,43 @@ macro_rules! os_log_error {
 }
 
 macro_rules! os_log_format_buffer_size {
-    ("%{public}s", $arg:expr) => {
+    ("%{public}s", $str_arg:expr) => {
         12
     };
+    ("%{public}s: %{darwin.errno}d", $str_arg:expr, $errno_arg:expr) => {
+        18
+    };
     ($fmt:tt $(, $arg:expr)*) => {
-        // TODO: Only works for `"%{public}s", message`
         compile_error!("os_log_format_buffer_size doesn't handle these arguments yet")
     };
 }
 
 macro_rules! os_log_format {
-    ($os_fmt_buf:expr, "%{public}s", $arg:expr) => {
+    ($os_fmt_buf:expr, "%{public}s", $str_arg:expr) => {
         $os_fmt_buf[0] = 0x02;
         $os_fmt_buf[1] = 0x01;
         $os_fmt_buf[2] = 0x22;
         $os_fmt_buf[3] = 0x08;
 
         let target = &raw mut $os_fmt_buf[4] as *mut *const c_char;
-        target.write_unaligned($arg);
+        target.write_unaligned($str_arg);
+    };
+    ($os_fmt_buf:expr, "%{public}s: %{darwin.errno}d", $str_arg:expr, $errno_arg:expr) => {
+        $os_fmt_buf[0] = 0x02;
+        $os_fmt_buf[1] = 0x02;
+        $os_fmt_buf[2] = 0x22;
+        $os_fmt_buf[3] = 0x08;
+
+        let target = &raw mut $os_fmt_buf[4] as *mut *const c_char;
+        target.write_unaligned($str_arg);
+
+        $os_fmt_buf[12] = 0x00;
+        $os_fmt_buf[13] = 0x04;
+
+        let target = &raw mut $os_fmt_buf[14] as *mut i32;
+        target.write_unaligned($errno_arg);
     };
     ($os_fmt_buf:expr, $fmt:tt $(, $arg:expr)*) => {
-        // TODO: Only works for `"%{public}s", message`
         compile_error!("os_log_format doesn't handle these arguments yet")
     };
 }
@@ -159,22 +175,39 @@ impl Drop for Logger {
 }
 
 impl Logger {
-    pub fn new(subsystem: &std::ffi::CStr, category: &std::ffi::CStr) -> Self {
+    pub fn new(subsystem: &CStr, category: &CStr) -> Self {
         // Always succeeds
         let inner = unsafe { os_log_create(subsystem.as_ptr(), category.as_ptr()) };
 
         Logger { inner }
     }
 
-    pub fn log(&mut self, message: &std::ffi::CStr) {
+    pub fn log(&mut self, message: &CStr) {
         unsafe {
             os_log!(self.inner, "%{public}s", message.as_ptr());
         }
     }
 
-    pub fn error(&mut self, message: &std::ffi::CStr) {
+    pub fn error(&mut self, message: &CStr) {
         unsafe {
             os_log_error!(self.inner, "%{public}s", message.as_ptr());
         }
     }
+
+    pub fn error_with_errno(&mut self, message: &CStr, errno: c_int) {
+        unsafe {
+            os_log_error!(
+                self.inner,
+                "%{public}s: %{darwin.errno}d",
+                message.as_ptr(),
+                errno
+            );
+        }
+    }
+}
+
+#[test]
+fn test_logging_error_with_errno() {
+    let mut logger = Logger::new(c"awdldisabler.app", c"daemon");
+    logger.error_with_errno(c"This is a test", libc::EACCES);
 }
